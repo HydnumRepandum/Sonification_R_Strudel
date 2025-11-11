@@ -45,6 +45,13 @@ Use [EasyABC](https://sourceforge.net/projects/easyabc/) to open your `.abc` fil
 
 Use [Emanuel de Jong’s MIDI-To-Strudel tool](https://github.com/Emanuel-de-Jong/MIDI-To-Strudel) to translate your MIDI into **Strudel JavaScript** code.
 
+```
+#clone the repo 
+pip install -r requirements.txt
+
+python Midi-to-Strudel.py -m /Path/Sonification.mid
+```
+
 ---
 
 ### 4. Play it in Strudel
