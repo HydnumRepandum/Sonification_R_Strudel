@@ -60,6 +60,8 @@ When you’re happy with your result, **save your Strudel composition** as a `.j
 ```
 PoliSonification/
 ├── Data2Music.R               # Main R script to convert time series to ABC
+├    └──Sonification.R
+├    └──MakeSoundScale.R               
 ├── Political_Dataset/         # Example political datasets (e.g., democracy index)
 ├── JS_for_Strudel/            # Example Strudel compositions
 └── README.md                  # You are here
