@@ -3,155 +3,199 @@
 import pandas as pd
 import mido
 from mido import MidiFile, MidiTrack, Message, MetaMessage, bpm2tempo
-import matplotlib.pyplot as plt
+import glob
+import os
 import traceback
 
-def curve_to_midi(df, bpm=120, ppq=480, cc_number=1, outfile="automation_curve.mid"):
-    """
-    Converts a DataFrame with 'time_sec' and 'value_norm' columns into a MIDI CC automation file.
-    """
-    # 1. Create MIDI File and Track
-    mid = MidiFile(ticks_per_beat=ppq)
-    track = MidiTrack()
-    mid.tracks.append(track)
+def get_data_from_csv(file_path):
+    """Reads data from CSV and standardizes columns (without normalization)."""
+    try:
+        df = pd.read_csv(file_path)
+        # Map columns if needed (fallback to first two columns)
+        cols = df.columns.tolist()
+        if 'time_sec' not in cols or 'value_raw' not in cols:
+            if len(cols) >= 2:
+                # Assume col 0 is time, col 1 is the value
+                df = df.rename(columns={cols[0]: 'time_sec', cols[1]: 'value_raw'})
+            else:
+                print(f"Skipping {file_path}: Not enough columns.")
+                return None
+        return df
+    except Exception as e:
+        print(f"Error reading {file_path}: {e}")
+        return None
 
-    # 2. Set Tempo
+def create_track_from_df(df, track_name="Automation", bpm=120, ppq=480, cc_number=1, channel=0):
+    """Generates a MidiTrack from a DataFrame."""
+    track = MidiTrack()
+
+    # Set Tempo and Track Name
     tempo_val = bpm2tempo(bpm)
     track.append(MetaMessage('set_tempo', tempo=tempo_val, time=0))
-    track.append(MetaMessage('track_name', name='Automation Curve', time=0))
+    track.append(MetaMessage('track_name', name=track_name, time=0))
 
-    # 3. Prepare Data
+    # Prepare data for conversion
     df = df.sort_values('time_sec').reset_index(drop=True)
-
-    # --- Normalization Check ---
-    # If values are not in [0, 1], normalize them to preserve the curve shape
-    v_min = df['value_norm'].min()
-    v_max = df['value_norm'].max()
-    if v_min < 0 or v_max > 1:
-        print(f"Values outside [0, 1] detected (min={v_min}, max={v_max}). Normalizing data to [0, 1]...")
-        if v_max != v_min:
-            df['value_norm'] = (df['value_norm'] - v_min) / (v_max - v_min)
-        else:
-            df['value_norm'] = 0.5  # Fallback if flat line
-
-    # 4. Convert to MIDI units
-    # beats = time_sec * (bpm / 60)
-    # ticks = beats * ppq
+    # Convert time to absolute ticks: time * (beats/sec) * ticks/beat
     df['abs_ticks'] = (df['time_sec'] * (bpm / 60.0) * ppq).round().astype(int)
+    # Convert value to CC (0-127). Assumes 'value_norm' is already present and [0,1]
+    df['cc_val'] = (df['value_norm'].fillna(0).clip(0, 1) * 127).round().astype(int)
 
-    # Convert value_norm [0, 1] -> MIDI CC [0, 127]
-    df['cc_val'] = (df['value_norm'].clip(0, 1) * 127).round().astype(int)
-
-    # 5. Generate MIDI Messages
     prev_tick = 0
     count = 0
-
-    for index, row in df.iterrows():
-        # Explicitly cast numpy types to native python int for mido
+    for _, row in df.iterrows():
         current_tick = int(row['abs_ticks'])
-        delta_time = current_tick - prev_tick
-
-        if delta_time < 0:
-            delta_time = 0
-
+        delta_time = max(0, current_tick - prev_tick)
         cc_val = int(row['cc_val'])
 
-        # Create Control Change Message
-        msg = Message('control_change', channel=0, control=cc_number, value=cc_val, time=delta_time)
+        msg = Message('control_change', channel=channel, control=cc_number, value=cc_val, time=delta_time)
         track.append(msg)
-
         prev_tick = current_tick
         count += 1
 
-    # End of track
     track.append(MetaMessage('end_of_track', time=0))
-
-    # 6. Save File
-    mid.save(outfile)
-    print(f"Successfully saved MIDI file to: {outfile}")
-    print(f"Processed {count} events.")
+    return track, count
 
 # --- Main Execution Block ---
 
-file_path = '/content/world Transparent laws with predictable enforcement.csv'
 BPM = 120
 PPQ = 480
 CC_NUMBER = 1
-OUTPUT_FILE = "automation_curve.mid"
+OUTPUT_DIR = '/content/midi_exports'
 
-try:
-    print(f"Loading data from {file_path}...")
-    df = pd.read_csv(file_path)
+# Create output directory
+os.makedirs(OUTPUT_DIR, exist_ok=True)
+print(f"Output directory created: {OUTPUT_DIR}")
 
-    # --- Column Mapping ---
-    # Map first two columns if standard names don't exist
-    if 'time_sec' not in df.columns or 'value_norm' not in df.columns:
-        print("Standard column names not found. Mapping first two columns to 'time_sec' and 'value_norm'...")
-        cols = df.columns.tolist()
-        # Ensure we have enough columns
-        if len(cols) >= 2:
-            df = df.rename(columns={cols[0]: 'time_sec', cols[1]: 'value_norm'})
+# 1. Find Files
+all_files = glob.glob('/content/*.csv')
+csv_files = [f for f in all_files if 'sample_data' not in f]
+print(f"Found {len(csv_files)} CSV files.")
+
+# 2. First Pass: Load Data & Determine Global Min/Max
+data_list = []
+all_values = []
+
+for file_path in csv_files:
+    df = get_data_from_csv(file_path)
+    if df is not None:
+        # Collect valid values for global range calculation
+        valid_vals = df['value_raw'].dropna().tolist()
+        all_values.extend(valid_vals)
+
+        # Store for next step
+        data_list.append({'path': file_path, 'df': df})
+
+if not all_values:
+    print("No data found in files.")
+else:
+    global_min = min(all_values)
+    global_max = max(all_values)
+    print(f"Global Range determined: {global_min} to {global_max}")
+
+    # Initialize the Master MIDI file
+    master_mid = MidiFile(ticks_per_beat=PPQ)
+
+    # 3. Second Pass: Normalize & Generate MIDI
+    for i, item in enumerate(data_list):
+        df = item['df']
+        file_path = item['path']
+
+        file_name = os.path.basename(file_path)
+        track_name = file_name.split(' Transparent')[0] if ' Transparent' in file_name else file_name.replace('.csv', '')
+
+        print(f"\nProcessing: {track_name}")
+
+        # Global Normalization
+        if global_max > global_min:
+            df['value_norm'] = (df['value_raw'] - global_min) / (global_max - global_min)
         else:
-            raise ValueError("CSV file must have at least two columns.")
+            df['value_norm'] = 0.5
 
-    print("Data Preview:")
-    print(df[['time_sec', 'value_norm']].head())
+        # Cycle through channels 0-15
+        channel = i % 16
 
-    # Execute Conversion
-    curve_to_midi(df, bpm=BPM, ppq=PPQ, cc_number=CC_NUMBER, outfile=OUTPUT_FILE)
+        # Create the track
+        track, event_count = create_track_from_df(df, track_name=track_name, bpm=BPM, ppq=PPQ, cc_number=CC_NUMBER, channel=channel)
 
-    # ------------------------------------------------------------------
-    # 3. Plot your curve vs. exported MIDI (visual verification)
-    # ------------------------------------------------------------------
-    print("Reading back MIDI file for visual verification...")
-    mid = MidiFile(OUTPUT_FILE)
+        # Add to Master MIDI File
+        master_mid.tracks.append(track)
 
-    ticks_per_beat = mid.ticks_per_beat
-    tempo = None  # We’ll pick up the tempo from the MIDI, or fall back to BPM
+        # Save as Individual MIDI File
+        single_mid = MidiFile(ticks_per_beat=PPQ)
+        single_mid.tracks.append(track)
 
-    cc_times = []
-    cc_vals = []
+        output_filename = os.path.join(OUTPUT_DIR, f"output_{track_name.replace(' ', '_')}.mid")
+        single_mid.save(output_filename)
+        print(f"  -> Saved individual: {output_filename}")
 
-    current_ticks = 0
-    for track in mid.tracks:
-        for msg in track:
-            current_ticks += msg.time  # accumulate delta times
-            if msg.type == 'set_tempo' and tempo is None:
-                tempo = msg.tempo
-            if msg.type == 'control_change' and msg.control == CC_NUMBER:
-                # Use tempo from file if present, else default to BPM
-                if tempo is None:
-                    tempo = bpm2tempo(BPM)
-                seconds = mido.tick2second(current_ticks, ticks_per_beat, tempo)
-                cc_times.append(seconds)
-                cc_vals.append(msg.value)
+    # Save the combined Master MIDI file
+    master_output = os.path.join(OUTPUT_DIR, "all_curves_combined.mid")
+    master_mid.save(master_output)
+    print(f"\n[SUCCESS] Saved combined MIDI file to: {master_output}")
 
-    if not cc_times:
-        print("No CC messages found in the MIDI file for the specified CC number.")
-    else:
-        midi_df = pd.DataFrame({
-            "time_sec": cc_times,
-            "cc_value": cc_vals
-        })
-        # Normalize CC values [0,127] -> [0,1] for comparison
-        midi_df["value_norm"] = midi_df["cc_value"] / 127.0
 
-        print("MIDI Data Preview:")
-        print(midi_df.head())
+import matplotlib.pyplot as plt
+import math
 
-        # Plot original curve vs. MIDI reconstruction
-        plt.figure(figsize=(10, 4))
-        plt.plot(df["time_sec"], df["value_norm"], label="Original curve")
-        plt.step(midi_df["time_sec"], midi_df["value_norm"], where="post", label="From MIDI")
-        plt.xlabel("Time (s)")
-        plt.ylabel("Normalized value")
-        plt.title("Original automation vs. MIDI-exported automation")
-        plt.legend()
-        plt.tight_layout()
-        plt.show()
+# Setup figure with 2 subplots sharing the X axis
+fig, (ax1, ax2) = plt.subplots(2, 1, figsize=(14, 12), sharex=True)
 
-except FileNotFoundError:
-    print(f"Error: The file '{file_path}' was not found.")
-except Exception as e:
-    print(f"An error occurred: {e}")
-    traceback.print_exc()
+# Ensure globals exist
+if 'global_min' not in locals() or 'global_max' not in locals():
+    # Recalculate if variables are missing (e.g., partial run)
+    all_vals = []
+    for f in csv_files:
+        d = get_data_from_csv(f)
+        if d is not None: all_vals.extend(d['value_raw'].dropna().tolist())
+    global_min, global_max = min(all_vals), max(all_vals)
+
+for i, file_path in enumerate(csv_files):
+    file_name = os.path.basename(file_path)
+    track_name = file_name.split(' Transparent')[0] if ' Transparent' in file_name else file_name.replace('.csv', '')
+
+    df = get_data_from_csv(file_path)
+
+    if df is not None:
+        # --- Plot 1: Original Data ---
+        ax1.plot(df['time_sec'], df['value_raw'], label=track_name, linewidth=2, alpha=0.8)
+
+        # --- Plot 2: MIDI CC Data ---
+        # Calculate CC values based on Global Norm
+        val_norm = (df['value_raw'] - global_min) / (global_max - global_min)
+        cc_vals = (val_norm.clip(0, 1) * 127).round()
+
+        # Plot as steps
+        ax2.step(df['time_sec'], cc_vals, label=track_name, linewidth=1.5, where='mid')
+
+# Styling Plot 1 (Original)
+ax1.set_title(f'Original Raw Values (Global Range: {global_min:.2f} - {global_max:.2f})', fontsize=14)
+ax1.set_ylabel('Original Value')
+ax1.grid(True, alpha=0.3)
+ax1.legend(bbox_to_anchor=(1.01, 1), loc='upper left')
+
+# Styling Plot 2 (MIDI)
+ax2.set_title('Generated MIDI CC Values (0-127)', fontsize=14)
+ax2.set_ylabel('MIDI CC Value')
+ax2.set_xlabel('Time')
+ax2.grid(True, alpha=0.3)
+ax2.legend(bbox_to_anchor=(1.01, 1), loc='upper left')
+
+plt.suptitle('Global Comparison: All Countries', fontsize=16)
+plt.tight_layout()
+plt.show()
+
+from google.colab import files
+import shutil
+import os
+
+output_dir = '/content/midi_exports'
+zip_file_name = 'midi_exports.zip'
+
+# Create a zip archive of the directory
+shutil.make_archive(os.path.join('/content', os.path.splitext(zip_file_name)[0]), 'zip', output_dir)
+
+print(f"Created {zip_file_name} in /content/")
+
+# Offer the zip file for download
+files.download(os.path.join('/content', zip_file_name))
