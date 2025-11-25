@@ -11,7 +11,7 @@ This repository translates and extends Pattyn’s work to the field of **Politic
 
 ## 🔄 Main Changes
 
-1. **Full rewrite** of the original MATLAB code into **R**.
+1. **Full rewrite** of the original MATLAB code into **R** and **Python**.
 2. **Adaptation** for CSV inputs containing **temporal series in political science**, such as the [V-Dem Democracy Index](https://v-dem.net/data_analysis/VariableGraph/).
 3. **Framework extension** to convert `.abc` files into **Strudel** code — a JavaScript live-coding environment for generative music.
 
